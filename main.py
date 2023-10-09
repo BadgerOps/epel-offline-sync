@@ -1,3 +1,7 @@
+#!/usr/bin/env python3.9
+
+# we lock to python 3.9 for now...
+
 import os
 import urllib.request
 import gzip
@@ -7,11 +11,8 @@ import argparse
 import logging
 import time
 import threading
-import concurrent.futures
 from datetime import datetime
-
-
-
+import concurrent.futures
 
 
 def load_config(config_file='./config.ini'):
@@ -21,18 +22,18 @@ def load_config(config_file='./config.ini'):
     return config
 
 
-class EPelpackageManager:
+class EPELDownloader:
     def __init__(self, base_url, local_dir):
         self.base_url = base_url
         self.local_dir = local_dir
         os.makedirs(self.local_dir, exist_ok=True)
         self.parse_arguments()
-        self.num_threads = 4
+        self.num_threads = 6
         self.setup_logging()
         self._status = {'status': 'init',
                         'threadstatus': {},
                         }
-        logging.info(f"Initialized EPelpackageManager for {base_url} with local dir {local_dir}")
+        logging.info(f"Initialized EPELDownloader for {base_url} with local dir {local_dir}")
 
     def setup_logging(self, log_file='epel_manager.log'):
         # Create a logger
@@ -109,16 +110,19 @@ class EPelpackageManager:
         else:
             logging.debug(f"Not downloading package: {filepath} since it is up to date")
 
-    def download_package_group(self, package_group, count):
-        # we don't use count...
+    def download_package_group(self, package_group):
+        thread_name = threading.current_thread().name
+        logging.info(
+        f"{thread_name} started processing {len(package_group)} packages")
         for pkg_location in package_group:
             pkg_url = os.path.join(self.base_url, pkg_location)
             if self.args.force or self.file_needs_update(pkg_url):
                 self.download_file(pkg_url)
+        logging.info(f"{thread_name} finished processing packages")
 
     def enumerate_and_download_packages(self):
         """
-
+        TODO: break this mess up (haha, as with every project)
         :return:
         """
         start_time = time.time()
@@ -148,7 +152,6 @@ class EPelpackageManager:
             else:
                 logging.debug(f"Already downloaded file ")
 
-
         package_namespace = {'common': 'http://linux.duke.edu/metadata/common'}
         packages = primary_root.findall("common:package", namespaces=package_namespace)
         grouped_packages = {}
@@ -159,25 +162,15 @@ class EPelpackageManager:
                 grouped_packages[start_letter] = []
             grouped_packages[start_letter].append(pkg_location)
 
-        # Create threads for each group and start them
-        threads = []
-        count = 0
-        for group_id, package_group in grouped_packages.items():
-            logging.info(f"starting thread {count} for package group {group_id}")
-            if self.args.debug:
-                logging.debug(f"Downloading {len(package_group)} files from package group {group_id}")
+        # Use ThreadPoolExecutor to download packages in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_threads) as executor:
+            # Using a list comprehension to start all threads
+            futures = [executor.submit(self.download_package_group, package_group) for package_group in
+                       grouped_packages.values()]
 
-            thread = threading.Thread(target=self.download_package_group, args=(package_group, count,),
-                                      name=f"Thread-{group_id}-{count}",)
-            self.set_threadstatus(f"Group: {group_id}", "Downloading...")
-            logging.info(f"Starting thread #{thread.name} for groupid: {group_id}")
-            thread.start()
-            count += 1
-            # Wait for all threads to complete
-            for thread in threads:
-                self.set_threadstatus(f"Group: {group_id}", "Completed...")
-                logging.info(f"joining thread {thread.name}")
-                thread.join()
+            # Wait for all futures to complete
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
 
         elapsed_time = time.time() - start_time
         logging.info(f"Downloaded repo from {self.base_url} in {elapsed_time:.2f} seconds.")
@@ -236,7 +229,7 @@ if __name__ == "__main__":
         logging.info(f"Processing {version}...")
         base_url = config[version]['base_url']
         local_dir = config[version]['local_dir']
-        manager = EPelpackageManager(base_url, local_dir)
+        manager = EPELDownloader(base_url, local_dir)
         manager.check_for_updates()
         manager.enumerate_and_download_packages()
 
