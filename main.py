@@ -11,24 +11,7 @@ import concurrent.futures
 from datetime import datetime
 
 
-def setup_logging(log_file='epel_manager.log'):
-    # Create a logger
-    logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
 
-    # Create a formatter
-    formatter = logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
-    # Create a file handler and set level to info
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-
-    # If running in an IDE, also log to stdout
-    if 'PYTHON_IDE' in os.environ:
-        stdout_handler = logging.StreamHandler()
-        stdout_handler.setFormatter(formatter)
-        logger.addHandler(stdout_handler)
 
 
 def load_config(config_file='./config.ini'):
@@ -45,13 +28,36 @@ class EPelpackageManager:
         os.makedirs(self.local_dir, exist_ok=True)
         self.parse_arguments()
         self.num_threads = 4
+        self.setup_logging()
         self._status = {'status': 'init',
-                        # 'hostname': self.hostname,
-                        # 'environment': self.env,
                         'threadstatus': {},
                         }
         logging.info(f"Initialized EPelpackageManager for {base_url} with local dir {local_dir}")
 
+    def setup_logging(self, log_file='epel_manager.log'):
+        # Create a logger
+        logger = logging.getLogger()
+        if self.args.debug:
+            logger.setLevel(logging.DEBUG)
+        else:
+            logger.setLevel(logging.INFO)
+
+        # Create a formatter
+        formatter = logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+        # Create a file handler and set level to info
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        if self.args.debug:
+            stdout_handler = logging.StreamHandler()
+            logger.addHandler(stdout_handler)
+
+        # If running in an IDE, also log to stdout
+        if 'PYTHON_IDE' in os.environ:
+            stdout_handler = logging.StreamHandler()
+            stdout_handler.setFormatter(formatter)
+            logger.addHandler(stdout_handler)
 
     def parse_arguments(self):
         parser = argparse.ArgumentParser(description="Download packages from EPEL")
@@ -80,6 +86,7 @@ class EPelpackageManager:
     def get_repomd_path(self):
         primary_xml_path = os.path.join(self.base_url, 'repodata/repomd.xml')
         return primary_xml_path
+
     def fetch_and_extract_gz(self, url, extraction_path):
         with urllib.request.urlopen(url) as response:
             with gzip.GzipFile(fileobj=response) as uncompressed:
@@ -94,15 +101,21 @@ class EPelpackageManager:
         filename = file_url.split('/')[-1]
         filepath = os.path.join(self.local_dir, file_url.replace(self.base_url, ''))
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        if self.args.force or self.file_needs_update(filename):
+            logging.debug(f"Updating package: {filepath}")
 
-        with urllib.request.urlopen(file_url) as response, open(filepath, 'wb') as out_file:
-            out_file.write(response.read())
+            with urllib.request.urlopen(file_url) as response, open(filepath, 'wb') as out_file:
+                out_file.write(response.read())
+        else:
+            logging.debug(f"Not downloading package: {filepath} since it is up to date")
 
-    def download_package_group(self, package_group):
+    def download_package_group(self, package_group, count):
+        # we don't use count...
         for pkg_location in package_group:
             pkg_url = os.path.join(self.base_url, pkg_location)
             if self.args.force or self.file_needs_update(pkg_url):
                 self.download_file(pkg_url)
+
     def enumerate_and_download_packages(self):
         """
 
@@ -138,14 +151,6 @@ class EPelpackageManager:
 
         package_namespace = {'common': 'http://linux.duke.edu/metadata/common'}
         packages = primary_root.findall("common:package", namespaces=package_namespace)
-        # for pkg in packages:
-        #     pkg_location = pkg.find("common:location", namespaces=package_namespace).get('href')
-        #     pkg_url = os.path.join(self.base_url, pkg_location)
-        #     logging.debug(f"checking package {pkg_url}")
-        #     if pkg_url.split('/')[-2] == 't':
-        #         if self.args.force or self.file_needs_update(pkg_url):
-        #             logging.debug(f"Downloading package: {pkg_url}")
-        #             self.download_file(pkg_url)
         grouped_packages = {}
         for pkg in packages:
             pkg_location = pkg.find("common:location", namespaces=package_namespace).get('href')
@@ -156,20 +161,23 @@ class EPelpackageManager:
 
         # Create threads for each group and start them
         threads = []
+        count = 0
         for group_id, package_group in grouped_packages.items():
-            logging.info(f"starting thread for package group {group_id}")
+            logging.info(f"starting thread {count} for package group {group_id}")
             if self.args.debug:
-                logging.debug(f"Downloading {len(package_group)} files from {group_id}")
-            thread = threading.Thread(target=self.download_package_group, args=(package_group,), name=f"Thread-{group_id}")
-            self.set_threadstatus(f"Group: {group_id}", "DOWNLOAD")
-            threads.append(thread)
+                logging.debug(f"Downloading {len(package_group)} files from package group {group_id}")
+
+            thread = threading.Thread(target=self.download_package_group, args=(package_group, count,),
+                                      name=f"Thread-{group_id}-{count}",)
+            self.set_threadstatus(f"Group: {group_id}", "Downloading...")
+            logging.info(f"Starting thread #{thread.name} for groupid: {group_id}")
             thread.start()
-
-        # Wait for all threads to complete
-        for thread in threads:
-            logging.debug(f"joining thread {thread.name}")
-            thread.join()
-
+            count += 1
+            # Wait for all threads to complete
+            for thread in threads:
+                self.set_threadstatus(f"Group: {group_id}", "Completed...")
+                logging.info(f"joining thread {thread.name}")
+                thread.join()
 
         elapsed_time = time.time() - start_time
         logging.info(f"Downloaded repo from {self.base_url} in {elapsed_time:.2f} seconds.")
@@ -216,19 +224,20 @@ class EPelpackageManager:
         local_size = os.path.getsize(local_path)
 
         if local_size != remote_size:
+            logging.debug(f"file size changed, re-downloading")
             return True
 
+        logging.debug(f"File exists locally, no need to re-download {file_url}")
         return False
 
 if __name__ == "__main__":
-    setup_logging()
     config = load_config()
     for version in config.sections():
         logging.info(f"Processing {version}...")
         base_url = config[version]['base_url']
         local_dir = config[version]['local_dir']
         manager = EPelpackageManager(base_url, local_dir)
+        manager.check_for_updates()
         manager.enumerate_and_download_packages()
-        if not manager.args.force:
-            manager.check_for_updates()
+
 
