@@ -6,6 +6,9 @@ import configparser
 import argparse
 import logging
 import time
+import threading
+import concurrent.futures
+from datetime import datetime
 
 
 def setup_logging(log_file='epel_manager.log'):
@@ -35,21 +38,39 @@ def load_config(config_file='./config.ini'):
     return config
 
 
-
-
 class EPelpackageManager:
     def __init__(self, base_url, local_dir):
         self.base_url = base_url
         self.local_dir = local_dir
         os.makedirs(self.local_dir, exist_ok=True)
         self.parse_arguments()
+        self.num_threads = 4
+        self._status = {'status': 'init',
+                        # 'hostname': self.hostname,
+                        # 'environment': self.env,
+                        'threadstatus': {},
+                        }
         logging.info(f"Initialized EPelpackageManager for {base_url} with local dir {local_dir}")
 
 
     def parse_arguments(self):
         parser = argparse.ArgumentParser(description="Download packages from EPEL")
         parser.add_argument('-f', '--force', action='store_true', help="Force re-download of everything")
+        parser.add_argument('-d', '--debug', action='store_true', help="Turn on debug options")
         self.args = parser.parse_args()
+
+    def status(self):
+        """Make a copy of status dict and return it"""
+        currentstatus = self._status.copy()
+        return currentstatus
+
+    def set_threadstatus(self, thread, status):
+        if not thread in self._status['threadstatus'].keys():
+            self._status['threadstatus'][thread] = {}
+        self._status['threadstatus'][thread]['ts'] = datetime.now()
+        self._status['threadstatus'][thread]['status'] = str(status)
+        logging.debug("Status: {1}".format(thread, status))
+
 
     def fetch_xml(self, url):
         logging.info(f"Fetching XML from {url}")
@@ -77,6 +98,11 @@ class EPelpackageManager:
         with urllib.request.urlopen(file_url) as response, open(filepath, 'wb') as out_file:
             out_file.write(response.read())
 
+    def download_package_group(self, package_group):
+        for pkg_location in package_group:
+            pkg_url = os.path.join(self.base_url, pkg_location)
+            if self.args.force or self.file_needs_update(pkg_url):
+                self.download_file(pkg_url)
     def enumerate_and_download_packages(self):
         """
 
@@ -112,15 +138,37 @@ class EPelpackageManager:
 
         package_namespace = {'common': 'http://linux.duke.edu/metadata/common'}
         packages = primary_root.findall("common:package", namespaces=package_namespace)
+        # for pkg in packages:
+        #     pkg_location = pkg.find("common:location", namespaces=package_namespace).get('href')
+        #     pkg_url = os.path.join(self.base_url, pkg_location)
+        #     logging.debug(f"checking package {pkg_url}")
+        #     if pkg_url.split('/')[-2] == 't':
+        #         if self.args.force or self.file_needs_update(pkg_url):
+        #             logging.debug(f"Downloading package: {pkg_url}")
+        #             self.download_file(pkg_url)
+        grouped_packages = {}
         for pkg in packages:
             pkg_location = pkg.find("common:location", namespaces=package_namespace).get('href')
-            pkg_url = os.path.join(self.base_url, pkg_location)
-            logging.debug(f"checking package {pkg_url}")
-            if pkg_url.split('/')[-2] == 't':
-                if self.args.force or self.file_needs_update(pkg_url):
-                    logging.debug(f"Downloading package: {pkg_url}")
-                    self.download_file(pkg_url)
+            start_letter = pkg_location.split('/')[1]  # Get the starting letter
+            if start_letter not in grouped_packages:
+                grouped_packages[start_letter] = []
+            grouped_packages[start_letter].append(pkg_location)
 
+        # Create threads for each group and start them
+        threads = []
+        for group_id, package_group in grouped_packages.items():
+            logging.info(f"starting thread for package group {group_id}")
+            if self.args.debug:
+                logging.debug(f"Downloading {len(package_group)} files from {group_id}")
+            thread = threading.Thread(target=self.download_package_group, args=(package_group,), name=f"Thread-{group_id}")
+            self.set_threadstatus(f"Group: {group_id}", "DOWNLOAD")
+            threads.append(thread)
+            thread.start()
+
+        # Wait for all threads to complete
+        for thread in threads:
+            logging.debug(f"joining thread {thread.name}")
+            thread.join()
 
 
         elapsed_time = time.time() - start_time
