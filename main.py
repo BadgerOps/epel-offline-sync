@@ -11,6 +11,7 @@ import argparse
 import logging
 import time
 import threading
+import hashlib
 from datetime import datetime
 import concurrent.futures
 
@@ -102,13 +103,9 @@ class EPELDownloader:
         filename = file_url.split('/')[-1]
         filepath = os.path.join(self.local_dir, file_url.replace(self.base_url, ''))
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        if self.args.force or self.file_needs_update(filename):
-            logging.debug(f"Updating package: {filepath}")
-
-            with urllib.request.urlopen(file_url) as response, open(filepath, 'wb') as out_file:
-                out_file.write(response.read())
-        else:
-            logging.debug(f"Not downloading package: {filepath} since it is up to date")
+        logging.debug(f"Updating package: {filepath}")
+        with urllib.request.urlopen(file_url) as response, open(filepath, 'wb') as out_file:
+            out_file.write(response.read())
 
     def download_package_group(self, package_group):
         thread_name = threading.current_thread().name
@@ -116,8 +113,10 @@ class EPELDownloader:
         f"{thread_name} started processing {len(package_group)} packages")
         for pkg_location in package_group:
             pkg_url = os.path.join(self.base_url, pkg_location)
-            if self.args.force or self.file_needs_update(pkg_url):
+            if self.args.force or self.file_needs_update(pkg_url, pkg_location):
                 self.download_file(pkg_url)
+            else:
+                logging.debug(f"Not downloading package: {pkg_location} since it is up to date")
         logging.info(f"{thread_name} finished processing packages")
 
     def enumerate_and_download_packages(self):
@@ -126,6 +125,7 @@ class EPELDownloader:
         :return:
         """
         start_time = time.time()
+        self.package_checksums = {}
         logging.info(f"Downloading repomd.xml from {self.base_url}")
         repomd_path = self.get_repomd_path()
         self.download_file(repomd_path)
@@ -157,6 +157,9 @@ class EPELDownloader:
         grouped_packages = {}
         for pkg in packages:
             pkg_location = pkg.find("common:location", namespaces=package_namespace).get('href')
+            checksum_elem = pkg.find("common:checksum[@type='sha256']", namespaces=package_namespace)
+            if checksum_elem is not None:
+                self.package_checksums[pkg_location] = checksum_elem.text
             start_letter = pkg_location.split('/')[1]  # Get the starting letter
             if start_letter not in grouped_packages:
                 grouped_packages[start_letter] = []
@@ -168,7 +171,7 @@ class EPELDownloader:
             futures = [executor.submit(self.download_package_group, package_group) for package_group in
                        grouped_packages.values()]
 
-            # Wait for all futures to complete
+            # Wait for all threads to complete
             for future in concurrent.futures.as_completed(futures):
                 future.result()
 
@@ -203,24 +206,22 @@ class EPELDownloader:
         """Given a file URL, return its local path."""
         return os.path.join(self.local_dir, file_url.replace(self.base_url, ''))
 
-    def file_needs_update(self, file_url):
+    def file_needs_update(self, file_url, pkg_location):
         """Check if the file needs to be updated."""
         local_path = self.get_local_path(file_url)
 
         if not os.path.exists(local_path):
             return True  # file does not exist locally
 
-        # If you're using file sizes to check, get remote file size
-        remote_file_info = urllib.request.urlopen(file_url).info()
-        remote_size = int(remote_file_info.get('Content-Length', 0))
-
-        local_size = os.path.getsize(local_path)
-
-        if local_size != remote_size:
+        # Compute local file's SHA256 checksum
+        with open(local_path, 'rb') as f:
+            local_checksum = hashlib.sha256(f.read()).hexdigest()
+        # Compare with remote checksum
+        remote_checksum = self.package_checksums.get(pkg_location)
+        if remote_checksum and local_checksum != remote_checksum:
             logging.debug(f"file size changed, re-downloading")
             return True
-
-        logging.debug(f"File exists locally, no need to re-download {file_url}")
+        logging.debug(f"Local file hash matches, no need to re-download {file_url}")
         return False
 
 if __name__ == "__main__":
@@ -232,5 +233,4 @@ if __name__ == "__main__":
         manager = EPELDownloader(base_url, local_dir)
         manager.check_for_updates()
         manager.enumerate_and_download_packages()
-
 
