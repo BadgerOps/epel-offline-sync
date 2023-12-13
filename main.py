@@ -16,6 +16,20 @@ from datetime import datetime
 import concurrent.futures
 
 
+
+def monitor_thread_activity(interval=30):
+    """
+    Quick and dirty little method to monitor thread status, because occasionally threads hang
+    """
+    while True:
+        # Get a list of all active Thread objects
+        active_threads = threading.enumerate()
+        # Prepare a string with the names of active threads
+        active_thread_names = ', '.join(thread.name for thread in active_threads if thread.name != "MainThread")
+        # Log the count and names of the active threads
+        logging.info(f"Active threads ({len(active_threads) - 1}): {active_thread_names}")
+        time.sleep(interval)
+
 def load_config(config_file='./config.ini'):
     logging.debug("loading configuration data from config.ini")
     config = configparser.ConfigParser()
@@ -30,10 +44,12 @@ class EPELDownloader:
         os.makedirs(self.local_dir, exist_ok=True)
         self.parse_arguments()
         self.num_threads = 6
+        self.num_packages_downloaded = 0
         self.setup_logging()
         self._status = {'status': 'init',
                         'threadstatus': {},
                         }
+        self.start_time = time.time()
         logging.info(f"Initialized EPELDownloader for {base_url} with local dir {local_dir}")
 
     def setup_logging(self, log_file='epel_manager.log'):
@@ -96,36 +112,55 @@ class EPELDownloader:
                     outfile.write(uncompressed.read())
 
     def download_file(self, file_url):
-        logging.debug(f"Downloading file {file_url}")
-        '''
-        Download the files...
-        '''
+        retries = 3
+        timeout = 300  # 5 minutes timeout in seconds5
+
         filename = file_url.split('/')[-1]
         filepath = os.path.join(self.local_dir, file_url.replace(self.base_url, ''))
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        logging.debug(f"Updating package: {filepath}")
-        with urllib.request.urlopen(file_url) as response, open(filepath, 'wb') as out_file:
-            out_file.write(response.read())
+        for attempt in range(retries):
+            try:
+                with urllib.request.urlopen(file_url, timeout=timeout) as response, open(filepath, 'wb') as out_file:
+                    out_file.write(response.read())
+                logging.debug(f"Successfully downloaded {file_url}")
+                break  # If download succeeds, break out of the loop
+            except urllib.error.URLError as e:
+                logging.warning(f"Attempt {attempt + 1} failed for {file_url}: {e}")
+                if attempt < retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    logging.error(f"Failed to download {file_url} after {retries} attempts.")
+                    pass  # Re-raise the last exception if all retries fail
+            except Exception as e:
+                logging.error(f"An error occurred while downloading {file_url}: {e}")
+                pass
 
-    def download_package_group(self, package_group):
-        thread_name = threading.current_thread().name
-        logging.info(
-        f"{thread_name} started processing {len(package_group)} packages")
+    def download_package_group(self, package_group, start_letter):
+        """
+        A method that is spun off as a thread to download all packages in a given group
+        """
+        
+        start_time = time.time()
+        threading.current_thread().name = f"Thread-{start_letter.upper()}"
+        logging.info(f"{threading.current_thread().name} started processing {len(package_group)} packages")
+        thread_pkgs = 0
         for pkg_location in package_group:
             pkg_url = os.path.join(self.base_url, pkg_location)
             if self.args.force or self.file_needs_update(pkg_url, pkg_location):
                 self.download_file(pkg_url)
+                # increment thread & total package counters
+                thread_pkgs += 1
+                self.num_packages_downloaded += 1
             else:
                 logging.debug(f"Not downloading package: {pkg_location} since it is up to date")
-        logging.info(f"{thread_name} finished processing packages")
+        elapsed_time = time.time() - start_time 
+        logging.info(f"{threading.current_thread().name} finished processing packages in {elapsed_time:.2f} seconds, downloaded {thread_pkgs} packages")
 
-    def enumerate_and_download_packages(self):
+    def initialize_repo_files(self):
         """
         TODO: break this mess up (haha, as with every project)
         :return:
         """
-        start_time = time.time()
-        self.package_checksums = {}
         logging.info(f"Downloading repomd.xml from {self.base_url}")
         repomd_path = self.get_repomd_path()
         self.download_file(repomd_path)
@@ -150,7 +185,25 @@ class EPELDownloader:
                 file_url = os.path.join(self.base_url, href)
                 self.download_file(file_url)
             else:
-                logging.debug(f"Already downloaded file ")
+                logging.debug(f"Already downloaded {file_url}")
+
+    def enumerate_package_groups(self):
+        """
+        Use the downloaded package.xml and repomd.xml to figure out what packages to download
+        :return: list of packages to download
+        """
+        self.package_checksums = {}
+        # TODO: fix the next 9 lines, they duplicate the initialize repo method above
+        repomd_path = self.get_repomd_path()
+        tree = self.fetch_xml(repomd_path)
+        root = tree.getroot()
+        namespace = {'repo': 'http://linux.duke.edu/metadata/repo'}
+        primary_xml_location = root.find("repo:data[@type='primary']/repo:location", namespaces=namespace).get('href')
+        primary_xml_url = os.path.join(self.base_url, primary_xml_location)
+        primary_xml_local_path = os.path.join(self.local_dir, "primary.xml")
+        logging.debug(f"primary xml local path is {primary_xml_local_path}")
+        primary_tree = ET.parse(primary_xml_local_path)
+        primary_root = primary_tree.getroot()
 
         package_namespace = {'common': 'http://linux.duke.edu/metadata/common'}
         packages = primary_root.findall("common:package", namespaces=package_namespace)
@@ -160,23 +213,31 @@ class EPELDownloader:
             checksum_elem = pkg.find("common:checksum[@type='sha256']", namespaces=package_namespace)
             if checksum_elem is not None:
                 self.package_checksums[pkg_location] = checksum_elem.text
-            start_letter = pkg_location.split('/')[1]  # Get the starting letter
+            start_letter = pkg_location.split('/')[1]  # Get the starting letter, for ease of threading.
             if start_letter not in grouped_packages:
                 grouped_packages[start_letter] = []
             grouped_packages[start_letter].append(pkg_location)
+        return grouped_packages
 
+    def main(self):
+        """
+        Aaand, go
+        """
+
+        grouped_packages = self.enumerate_package_groups()
         # Use ThreadPoolExecutor to download packages in parallel
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_threads) as executor:
-            # Using a list comprehension to start all threads
-            futures = [executor.submit(self.download_package_group, package_group) for package_group in
-                       grouped_packages.values()]
+            # Create futures list and populate as we start up threads
+            futures = [executor.submit(self.download_package_group, package_group, start_letter) for start_letter, package_group in
+                       grouped_packages.items()]
 
             # Wait for all threads to complete
             for future in concurrent.futures.as_completed(futures):
                 future.result()
 
-        elapsed_time = time.time() - start_time
+        elapsed_time = time.time() - self.start_time
         logging.info(f"Downloaded repo from {self.base_url} in {elapsed_time:.2f} seconds.")
+        logging.info(f"Downloaded a total of {self.num_packages_downloaded} files")
 
         total_size = 0
         for root, dirs, files in os.walk(self.local_dir):
@@ -188,8 +249,8 @@ class EPELDownloader:
         # Compare local repomd.xml with remote one
         local_repomd_path = os.path.join(self.local_dir, "repodata/repomd.xml")
         if not os.path.exists(local_repomd_path):
-            logging.info(f"Local repomd.xml does not exist. Running the enumeration and download method first.")
-            self.enumerate_and_download_packages()
+            logging.info(f"Local repomd.xml does not exist. Running the initialize_repo_files method.")
+            self.initialize_repo_files()
 
         local_repomd_tree = ET.parse(local_repomd_path)
         local_date = local_repomd_tree.find(".//{http://linux.duke.edu/metadata/repo}revision").text
@@ -198,9 +259,10 @@ class EPELDownloader:
         remote_date = remote_repomd_tree.find(".//{http://linux.duke.edu/metadata/repo}revision").text
 
         if local_date != remote_date:
-            logging.info(f"Updates are available. Consider rerunning the enumeration and download method.")
+            logging.info(f"Updates are available. Rerunning the initalize_repo_files method.")
+            self.initalize_repo_files()
         else:
-            logging.info(f"No updates are available.")
+            logging.info(f"No updates are available for repomd.xml localdate: {local_date}, remotedate: {remote_date}")
 
     def get_local_path(self, file_url):
         """Given a file URL, return its local path."""
@@ -226,11 +288,12 @@ class EPELDownloader:
 
 if __name__ == "__main__":
     config = load_config()
+    monitor = threading.Thread(target=monitor_thread_activity, name='Thread-Monitor', daemon=True)
+    monitor.start()
     for version in config.sections():
         logging.info(f"Processing {version}...")
         base_url = config[version]['base_url']
         local_dir = config[version]['local_dir']
         manager = EPELDownloader(base_url, local_dir)
         manager.check_for_updates()
-        manager.enumerate_and_download_packages()
-
+        manager.main()
