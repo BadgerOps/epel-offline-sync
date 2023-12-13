@@ -16,6 +16,20 @@ from datetime import datetime
 import concurrent.futures
 
 
+
+def monitor_thread_activity(interval=30):
+    """
+    Quick and dirty little method to monitor thread status, because occasionally threads hang
+    """
+    while True:
+        # Get a list of all active Thread objects
+        active_threads = threading.enumerate()
+        # Prepare a string with the names of active threads
+        active_thread_names = ', '.join(thread.name for thread in active_threads if thread.name != "MainThread")
+        # Log the count and names of the active threads
+        logging.info(f"Active threads ({len(active_threads) - 1}): {active_thread_names}")
+        time.sleep(interval)
+
 def load_config(config_file='./config.ini'):
     logging.debug("loading configuration data from config.ini")
     config = configparser.ConfigParser()
@@ -98,27 +112,28 @@ class EPELDownloader:
                     outfile.write(uncompressed.read())
 
     def download_file(self, file_url):
-        logging.debug(f"Downloading file {file_url}")
-        '''
-        Download the files...
-        '''
+        retries = 3
+        timeout = 300  # 5 minutes timeout in seconds5
+
         filename = file_url.split('/')[-1]
         filepath = os.path.join(self.local_dir, file_url.replace(self.base_url, ''))
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        logging.debug(f"Downloading file: {filepath}")
-        # We'll try 3 times to download the file
-        retries = 3
         for attempt in range(retries):
             try:
-                with urllib.request.urlopen(file_url) as response, open(local_path, 'wb') as out_file:
+                with urllib.request.urlopen(file_url, timeout=timeout) as response, open(filepath, 'wb') as out_file:
                     out_file.write(response.read())
+                logging.debug(f"Successfully downloaded {file_url}")
                 break  # If download succeeds, break out of the loop
-            except Exception as e:
+            except urllib.error.URLError as e:
                 logging.warning(f"Attempt {attempt + 1} failed for {file_url}: {e}")
                 if attempt < retries - 1:
                     time.sleep(2 ** attempt)  # Exponential backoff
                 else:
-                    logging.error(f"We tried 3 times, and are unable to download {file_path}")
+                    logging.error(f"Failed to download {file_url} after {retries} attempts.")
+                    pass  # Re-raise the last exception if all retries fail
+            except Exception as e:
+                logging.error(f"An error occurred while downloading {file_url}: {e}")
+                pass
 
     def download_package_group(self, package_group, start_letter):
         """
@@ -204,18 +219,17 @@ class EPELDownloader:
             grouped_packages[start_letter].append(pkg_location)
         return grouped_packages
 
-    def main(self, grouped_packages):
+    def main(self):
         """
         Aaand, go
         """
 
+        grouped_packages = self.enumerate_package_groups()
         # Use ThreadPoolExecutor to download packages in parallel
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_threads) as executor:
             # Create futures list and populate as we start up threads
-            futures = []
-            for start_letter, package_group in grouped_packages.items():
-                future = executor.submit(self.download_package_group, package_group, start_letter)
-                futures.append(future)
+            futures = [executor.submit(self.download_package_group, package_group, start_letter) for start_letter, package_group in
+                       grouped_packages.items()]
 
             # Wait for all threads to complete
             for future in concurrent.futures.as_completed(futures):
@@ -274,12 +288,12 @@ class EPELDownloader:
 
 if __name__ == "__main__":
     config = load_config()
+    monitor = threading.Thread(target=monitor_thread_activity, name='Thread-Monitor', daemon=True)
+    monitor.start()
     for version in config.sections():
         logging.info(f"Processing {version}...")
         base_url = config[version]['base_url']
         local_dir = config[version]['local_dir']
         manager = EPELDownloader(base_url, local_dir)
         manager.check_for_updates()
-        pkg_group = manager.enumerate_package_groups()
-        manager.main(pkg_group)
-
+        manager.main()
