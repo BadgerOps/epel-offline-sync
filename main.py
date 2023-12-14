@@ -260,7 +260,7 @@ class EPELDownloader:
 
         if local_date != remote_date:
             logging.info(f"Updates are available. Rerunning the initalize_repo_files method.")
-            self.initalize_repo_files()
+            self.initialize_repo_files()
         else:
             logging.info(f"No updates are available for repomd.xml localdate: {local_date}, remotedate: {remote_date}")
 
