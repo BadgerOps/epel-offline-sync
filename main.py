@@ -37,6 +37,7 @@ def load_config(config_file='./config.ini'):
     return config
 
 
+
 class EPELDownloader:
     def __init__(self, base_url, local_dir):
         self.base_url = base_url
@@ -46,9 +47,6 @@ class EPELDownloader:
         self.num_threads = 6
         self.num_packages_downloaded = 0
         self.setup_logging()
-        self._status = {'status': 'init',
-                        'threadstatus': {},
-                        }
         self.start_time = time.time()
         logging.info(f"Initialized EPELDownloader for {base_url} with local dir {local_dir}")
 
@@ -82,19 +80,6 @@ class EPELDownloader:
         parser.add_argument('-f', '--force', action='store_true', help="Force re-download of everything")
         parser.add_argument('-d', '--debug', action='store_true', help="Turn on debug options")
         self.args = parser.parse_args()
-
-    def status(self):
-        """Make a copy of status dict and return it"""
-        currentstatus = self._status.copy()
-        return currentstatus
-
-    def set_threadstatus(self, thread, status):
-        if not thread in self._status['threadstatus'].keys():
-            self._status['threadstatus'][thread] = {}
-        self._status['threadstatus'][thread]['ts'] = datetime.now()
-        self._status['threadstatus'][thread]['status'] = str(status)
-        logging.debug("Status: {1}".format(thread, status))
-
 
     def fetch_xml(self, url):
         logging.info(f"Fetching XML from {url}")
