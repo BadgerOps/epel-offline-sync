@@ -39,12 +39,12 @@ def load_config(config_file='./config.ini'):
 
 
 class EPELDownloader:
-    def __init__(self, base_url, local_dir):
+    def __init__(self, base_url, local_dir, threads):
         self.base_url = base_url
         self.local_dir = local_dir
         os.makedirs(self.local_dir, exist_ok=True)
         self.parse_arguments()
-        self.num_threads = 6
+        self.num_threads = threads
         self.num_packages_downloaded = 0
         self.setup_logging()
         self.start_time = time.time()
@@ -279,6 +279,7 @@ if __name__ == "__main__":
         logging.info(f"Processing {version}...")
         base_url = config[version]['base_url']
         local_dir = config[version]['local_dir']
-        manager = EPELDownloader(base_url, local_dir)
+        threads = config[version]['threads']
+        manager = EPELDownloader(base_url, local_dir, threads)
         manager.check_for_updates()
         manager.main()
