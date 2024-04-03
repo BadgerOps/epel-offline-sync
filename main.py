@@ -50,13 +50,23 @@ class EPELDownloader:
         self.parse_arguments()
         self.num_threads = threads
         self.num_packages_downloaded = 0
-        self.setup_logging()
+        self.setup_logging(log_file=self.args.log)
         self.start_time = time.time()
         logging.info(f"Initialized EPELDownloader for {base_url} with local dir {local_dir}")
 
-    def setup_logging(self, log_file='epel/logs/epel_manager.log'):
+    def parse_arguments(self):
+        parser = argparse.ArgumentParser(description="Download packages from EPEL")
+        parser.add_argument('-f', '--force', action='store_true', help="Force re-download of everything")
+        parser.add_argument('-d', '--debug', action='store_true', help="Turn on debug options")
+        parser.add_argument('-t', '--threads', type=int, default=4, help="Number of threads to use for downloading") # not used yet
+        parser.add_argument('-c', '--config', default='./config.ini', help="Path to the config file") # not used yet
+        parser.add_argument('-l', '--log', default='epel/logs/epel_manager.log', help="Path to the log file")
+        self.args = parser.parse_args()
+
+    def setup_logging(self, log_file='./epel_manager.log'):
         """
         Default to logging to ./epel_manager.log, but also log to stdout if in debug mode
+        Also accept a log_file argument to log to a different file
         Use standard formatter
         """
         os.makedirs(os.path.dirname(log_file), exist_ok=True)
@@ -81,12 +91,6 @@ class EPELDownloader:
             stdout_handler = logging.StreamHandler()
             stdout_handler.setFormatter(formatter)
             logger.addHandler(stdout_handler)
-
-    def parse_arguments(self):
-        parser = argparse.ArgumentParser(description="Download packages from EPEL")
-        parser.add_argument('-f', '--force', action='store_true', help="Force re-download of everything")
-        parser.add_argument('-d', '--debug', action='store_true', help="Turn on debug options")
-        self.args = parser.parse_args()
 
     def fetch_xml(self, url):
         logging.info(f"Fetching XML from {url}")
