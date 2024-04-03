@@ -16,18 +16,17 @@ from datetime import datetime
 import concurrent.futures
 
 
-
 def monitor_thread_activity(interval=30):
     """
-    Quick and dirty little method to monitor thread status, because occasionally threads hang
+    Quick and dirty little method to monitor thread status, because large numbers of files take a while to download
     """
     while True:
         # Get a list of all active Thread objects
         active_threads = threading.enumerate()
         # Prepare a string with the names of active threads
-        active_thread_names = ', '.join(thread.name for thread in active_threads if thread.name != "MainThread")
-        # Log the count and names of the active threads
-        logging.info(f"Active threads ({len(active_threads) - 1}): {active_thread_names}")
+        active_thread_names = ', '.join(thread.name for thread in active_threads if thread.name not in ["MainThread", "Thread-Monitor"])
+        # Log the count and names of the active threads (excluding the main thread and the monitor thread)
+        logging.info(f"Active threads ({len(active_threads) - 2}): {active_thread_names}")
         time.sleep(interval)
 
 def load_config(config_file='./config.ini'):
@@ -35,7 +34,6 @@ def load_config(config_file='./config.ini'):
     config = configparser.ConfigParser()
     config.read(config_file)
     return config
-
 
 
 class EPELDownloader:
@@ -61,6 +59,7 @@ class EPELDownloader:
         parser.add_argument('-t', '--threads', type=int, default=4, help="Number of threads to use for downloading") # not used yet
         parser.add_argument('-c', '--config', default='./config.ini', help="Path to the config file") # not used yet
         parser.add_argument('-l', '--log', default='epel/logs/epel_manager.log', help="Path to the log file")
+        parser.add_argument('-q', '--quiet', action='store_true', help="Suppress output to console")
         self.args = parser.parse_args()
 
     def setup_logging(self, log_file='./epel_manager.log'):
@@ -71,6 +70,10 @@ class EPELDownloader:
         """
         os.makedirs(os.path.dirname(log_file), exist_ok=True)
         logger = logging.getLogger()
+            # Remove all existing handlers
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+
         if self.args.debug:
             logger.setLevel(logging.DEBUG)
         else:
@@ -82,15 +85,22 @@ class EPELDownloader:
         file_handler = logging.FileHandler(log_file)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-        if self.args.debug:
-            stdout_handler = logging.StreamHandler()
-            logger.addHandler(stdout_handler)
 
-        # If running in an IDE, also log to stdout
-        if 'PYTHON_IDE' in os.environ:
-            stdout_handler = logging.StreamHandler()
-            stdout_handler.setFormatter(formatter)
-            logger.addHandler(stdout_handler)
+        if not self.args.quiet:
+            # Create a stdout handler and set level to debug
+            stout_handler = logging.StreamHandler()
+            stout_handler.setFormatter(formatter)
+            logger.addHandler(stout_handler)
+
+    def timeFormatter(self, elapsed_time):
+        """
+        Take elapsed_time in milliseconds and return hours, minutes, seconds
+        :param elapsed_time: time in milliseconds
+        :return: hours, minutes, seconds
+        """
+        hours, remainder = divmod(elapsed_time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return hours,minutes,seconds
 
     def fetch_xml(self, url):
         logging.info(f"Fetching XML from {url}")
@@ -156,8 +166,10 @@ class EPELDownloader:
                 self.num_packages_downloaded += 1
             else:
                 logging.debug(f"Not downloading package: {pkg_location} since it is up to date")
-        elapsed_time = time.time() - start_time 
-        logging.info(f"{threading.current_thread().name} finished processing packages in {elapsed_time:.2f} seconds, downloaded {thread_pkgs} packages")
+        elapsed_time = time.time() - start_time
+        hours, minutes, seconds = self.timeFormatter(elapsed_time)
+        logging.info(f"{threading.current_thread().name} finished processing: {thread_pkgs} packages downloaded in {int(hours)} hours, {int(minutes)} minutes, {seconds:.2f} seconds.")
+        return
 
     def initialize_repo_files(self):
         """
@@ -284,13 +296,15 @@ class EPELDownloader:
             futures = [executor.submit(self.download_package_group, package_group, start_letter) for start_letter, package_group in
                        grouped_packages.items()]
 
-            # Wait for all threads to complete
+            # Wait for all threads to complete, closing threads that have completed
             for future in concurrent.futures.as_completed(futures):
                 future.result()
+
+        # All threads have completed, shutdown the executor
+        executor.shutdown()
         # log total elapsed time and number of packages downloaded
         elapsed_time = time.time() - self.start_time
-        hours, remainder = divmod(elapsed_time, 3600)
-        minutes, seconds = divmod(remainder, 60)
+        hours, minutes, seconds = self.timeFormatter(elapsed_time)
         logging.info(f"Downloaded repo from {self.base_url} in {int(hours)} hours, {int(minutes)} minutes, and {seconds:.2f} seconds.")
         logging.info(f"Downloaded a total of {self.num_packages_downloaded} files")
         # log total space used by the repo(s)
