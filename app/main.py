@@ -283,7 +283,21 @@ class EPELDownloader:
             return True
         logging.debug(f"Local file hash matches, no need to re-download {file_url}")
         return False
-    
+
+    def get_total_files(self):
+        """
+        Get the total number of files in the downloaded repo
+        Get the total size of the files in the downloaded repo
+        :return: total number of files, total size of files
+        """
+        total_count = 0
+        total_size = 0
+        for root, dirs, files in os.walk(self.local_dir):
+            for file in files:
+                total_count += 1
+                total_size += os.path.getsize(os.path.join(root, file))
+        return total_count, total_size
+
     def main(self):
         """
         Main method to download the packages from EPEL using the repos specified in config.ini
@@ -302,19 +316,18 @@ class EPELDownloader:
 
         # All threads have completed, shutdown the executor
         executor.shutdown()
+        # calculate total file count and total repo size
+        total_file_count, total_repo_size = self.get_total_files()
         # log total elapsed time and number of packages downloaded
         elapsed_time = time.time() - self.start_time
         hours, minutes, seconds = self.timeFormatter(elapsed_time)
         logging.info(f"Downloaded repo from {self.base_url} in {int(hours)} hours, {int(minutes)} minutes, and {seconds:.2f} seconds.")
         logging.info(f"Downloaded a total of {self.num_packages_downloaded} files")
+        logging.info(f"Total files in the downloaded repo: {total_file_count}")
         # log total space used by the repo(s)
-        total_size = 0
-        for root, dirs, files in os.walk(self.local_dir):
-            for file in files:
-                total_size += os.path.getsize(os.path.join(root, file))
-        total_size_gb = total_size / (1024 * 1024 * 1024)
-        total_size_mb = total_size / (1024 * 1024)
-        logging.info(f"Total space used by the repo: {total_size_gb:.2f} GB, {total_size_mb:.2f} MB")
+        total_size_gb = total_repo_size / (1024 * 1024 * 1024)
+        total_size_mb = total_repo_size / (1024 * 1024)
+        logging.info(f"Total space used by the repo: {total_size_gb:.2f} GB")
 
 if __name__ == "__main__":
     """
