@@ -39,6 +39,10 @@ def load_config(config_file='./config.ini'):
 
 
 class EPELDownloader:
+    """
+    Initiate a class for downloading packages from EPEL
+    The __init__ method sets up some scaffolding  that we'll use in the rest of the program
+    """
     def __init__(self, base_url, local_dir, threads):
         self.base_url = base_url
         self.local_dir = local_dir
@@ -50,15 +54,18 @@ class EPELDownloader:
         self.start_time = time.time()
         logging.info(f"Initialized EPELDownloader for {base_url} with local dir {local_dir}")
 
-    def setup_logging(self, log_file='epel_manager.log'):
-        # Create a logger
+    def setup_logging(self, log_file='epel/logs/epel_manager.log'):
+        """
+        Default to logging to ./epel_manager.log, but also log to stdout if in debug mode
+        Use standard formatter
+        """
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
         logger = logging.getLogger()
         if self.args.debug:
             logger.setLevel(logging.DEBUG)
         else:
             logger.setLevel(logging.INFO)
 
-        # Create a formatter
         formatter = logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
         # Create a file handler and set level to info
@@ -97,8 +104,13 @@ class EPELDownloader:
                     outfile.write(uncompressed.read())
 
     def download_file(self, file_url):
+        """
+        Download a file from a given URL, with retries and exponential backoff
+        :param file_url: The URL of the file to download
+        :return: None
+        """
         retries = 3
-        timeout = 300  # 5 minutes timeout in seconds5
+        timeout = 300  # 5 minutes timeout in seconds
 
         filename = file_url.split('/')[-1]
         filepath = os.path.join(self.local_dir, file_url.replace(self.base_url, ''))
@@ -123,8 +135,10 @@ class EPELDownloader:
     def download_package_group(self, package_group, start_letter):
         """
         A method that is spun off as a thread to download all packages in a given group
+        :param package_group: list of packages to download
+        :param start_letter: the starting letter of the package group, used for thread naming
+        :return: None
         """
-        
         start_time = time.time()
         threading.current_thread().name = f"Thread-{start_letter.upper()}"
         logging.info(f"{threading.current_thread().name} started processing {len(package_group)} packages")
@@ -143,7 +157,8 @@ class EPELDownloader:
 
     def initialize_repo_files(self):
         """
-        TODO: break this mess up (haha, as with every project)
+        Download the repomd.xml file, prepare for processing packages
+        We use the repomd.xml file to figure out what other xml files we need to download and validate
         :return:
         """
         logging.info(f"Downloading repomd.xml from {self.base_url}")
@@ -170,15 +185,14 @@ class EPELDownloader:
                 file_url = os.path.join(self.base_url, href)
                 self.download_file(file_url)
             else:
-                logging.debug(f"Already downloaded {file_url}")
+                logging.debug(f"Already downloaded repomd {file_url}")
 
     def enumerate_package_groups(self):
         """
-        Use the downloaded package.xml and repomd.xml to figure out what packages to download
-        :return: list of packages to download
+        Use the previously downloaded package.xml and repomd.xml to figure out what packages to download
+        :return: list of packages grouped by first letter to download
         """
         self.package_checksums = {}
-        # TODO: fix the next 9 lines, they duplicate the initialize repo method above
         repomd_path = self.get_repomd_path()
         tree = self.fetch_xml(repomd_path)
         root = tree.getroot()
@@ -204,32 +218,6 @@ class EPELDownloader:
             grouped_packages[start_letter].append(pkg_location)
         return grouped_packages
 
-    def main(self):
-        """
-        Aaand, go
-        """
-
-        grouped_packages = self.enumerate_package_groups()
-        # Use ThreadPoolExecutor to download packages in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_threads) as executor:
-            # Create futures list and populate as we start up threads
-            futures = [executor.submit(self.download_package_group, package_group, start_letter) for start_letter, package_group in
-                       grouped_packages.items()]
-
-            # Wait for all threads to complete
-            for future in concurrent.futures.as_completed(futures):
-                future.result()
-
-        elapsed_time = time.time() - self.start_time
-        logging.info(f"Downloaded repo from {self.base_url} in {elapsed_time:.2f} seconds.")
-        logging.info(f"Downloaded a total of {self.num_packages_downloaded} files")
-
-        total_size = 0
-        for root, dirs, files in os.walk(self.local_dir):
-            for file in files:
-                total_size += os.path.getsize(os.path.join(root, file))
-        logging.info(f"Total space used by the repo: {total_size / (1024 * 1024):.2f} MB")
-
     def check_for_updates(self):
         # Compare local repomd.xml with remote one
         local_repomd_path = os.path.join(self.local_dir, "repodata/repomd.xml")
@@ -250,11 +238,20 @@ class EPELDownloader:
             logging.info(f"No updates are available for repomd.xml localdate: {local_date}, remotedate: {remote_date}")
 
     def get_local_path(self, file_url):
-        """Given a file URL, return its local path."""
+        """
+        Given a file URL, return its local path.
+        :param file_url: URL of the file to download
+        :return: Local path to save the file
+        """
         return os.path.join(self.local_dir, file_url.replace(self.base_url, ''))
 
     def file_needs_update(self, file_url, pkg_location):
-        """Check if the file needs to be updated."""
+        """
+        Check if the file needs to be updated.
+        :param file_url: URL of the file to download
+        :param pkg_location: location of the package in the repo
+        :return: True if the file needs to be updated, False otherwise
+        """
         local_path = self.get_local_path(file_url)
 
         if not os.path.exists(local_path):
@@ -266,12 +263,45 @@ class EPELDownloader:
         # Compare with remote checksum
         remote_checksum = self.package_checksums.get(pkg_location)
         if remote_checksum and local_checksum != remote_checksum:
-            logging.debug(f"file size changed, re-downloading")
+            logging.debug(f"file size changed, re-downloading {file_url}")
             return True
         logging.debug(f"Local file hash matches, no need to re-download {file_url}")
         return False
+    
+    def main(self):
+        """
+        Main method to download the packages from EPEL using the repos specified in config.ini
+        :return: None
+        """
+        grouped_packages = self.enumerate_package_groups()
+        # Use ThreadPoolExecutor to download packages in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=int(self.num_threads)) as executor:
+            # Create futures list and populate as we start up threads
+            futures = [executor.submit(self.download_package_group, package_group, start_letter) for start_letter, package_group in
+                       grouped_packages.items()]
+
+            # Wait for all threads to complete
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+        # log total elapsed time and number of packages downloaded
+        elapsed_time = time.time() - self.start_time
+        hours, remainder = divmod(elapsed_time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        logging.info(f"Downloaded repo from {self.base_url} in {int(hours)} hours, {int(minutes)} minutes, and {seconds:.2f} seconds.")
+        logging.info(f"Downloaded a total of {self.num_packages_downloaded} files")
+        # log total space used by the repo(s)
+        total_size = 0
+        for root, dirs, files in os.walk(self.local_dir):
+            for file in files:
+                total_size += os.path.getsize(os.path.join(root, file))
+        total_size_gb = total_size / (1024 * 1024 * 1024)
+        total_size_mb = total_size / (1024 * 1024)
+        logging.info(f"Total space used by the repo: {total_size_gb:.2f} GB, {total_size_mb:.2f} MB")
 
 if __name__ == "__main__":
+    """
+    Main entry point for the program if we're running interactively
+    """
     config = load_config()
     monitor = threading.Thread(target=monitor_thread_activity, name='Thread-Monitor', daemon=True)
     monitor.start()
