@@ -296,7 +296,7 @@ class EPELDownloader:
             futures = [executor.submit(self.download_package_group, package_group, start_letter) for start_letter, package_group in
                        grouped_packages.items()]
 
-            # Wait for all threads to complete, closing threads that have completed
+            # Wait for all threads to complete
             for future in concurrent.futures.as_completed(futures):
                 future.result()
 
