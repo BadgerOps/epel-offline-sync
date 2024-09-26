@@ -115,7 +115,12 @@ class EPELDownloader:
         with urllib.request.urlopen(url) as response:
             with gzip.GzipFile(fileobj=response) as uncompressed:
                 with open(extraction_path, 'wb') as outfile:
-                    outfile.write(uncompressed.read())
+                    try:
+                        outfile.write(uncompressed.read())
+                        return True
+                    except EOFError:
+                        logging.critical(f"unable to extract {url} to {extraction_path}")
+                        return False
 
     def download_file(self, file_url):
         """
@@ -189,7 +194,12 @@ class EPELDownloader:
         primary_xml_url = os.path.join(self.base_url, primary_xml_location)
         primary_xml_local_path = os.path.join(self.local_dir, "primary.xml")
 
-        self.fetch_and_extract_gz(primary_xml_url, primary_xml_local_path)
+        if not self.fetch_and_extract_gz(primary_xml_url, primary_xml_local_path):
+            time.sleep(5)
+            # try one more time
+            if not self.fetch_and_extract_gz(primary_xml_url, primary_xml_local_path):
+                logging.critical("could not download the primary.xml, exiting")
+                os._exit(1)
 
         primary_tree = ET.parse(primary_xml_local_path)
         primary_root = primary_tree.getroot()
@@ -201,7 +211,7 @@ class EPELDownloader:
                 file_url = os.path.join(self.base_url, href)
                 self.download_file(file_url)
             else:
-                logging.debug(f"Already downloaded repomd {file_url}")
+                logging.debug(f"Already downloaded repomd")
 
     def enumerate_package_groups(self):
         """
